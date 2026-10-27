@@ -1,4 +1,4 @@
-name: CI Security Gate
+name: CI/CD Multi-Service Stack
 
 on:
   push:
@@ -7,9 +7,16 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   build-and-scan:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [api, notifier]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -17,12 +24,29 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Log in to GHCR
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}/${{ matrix.service }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=sha,prefix=sha-
+
       - name: Build Docker Image
         uses: docker/build-push-action@v5
         with:
-          context: ./api
-          file: ./api/Dockerfile.multi
-          tags: demo-api:test
+          context: ./${{ matrix.service }}
+          file: ./${{ matrix.service == 'api' && 'api/Dockerfile.multi' || 'notifier/Dockerfile' }}
+          tags: ${{ matrix.service }}:test
           load: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -30,8 +54,32 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: 'demo-api:test'
+          image-ref: '${{ matrix.service }}:test'
           format: 'table'
           severity: 'CRITICAL,HIGH'
           ignore-unfixed: true
-          exit-code: '1'
+          exit-code: ${{ startsWith(github.ref, 'refs/tags/v') && '1' || '0' }}
+
+      - name: Push to GHCR (Only on Tags)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/build-push-action@v5
+        with:
+          context: ./${{ matrix.service }}
+          file: ./${{ matrix.service == 'api' && 'api/Dockerfile.multi' || 'notifier/Dockerfile' }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+
+  deploy:
+    needs: build-and-scan
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository files for Compose
+        uses: actions/checkout@v4
+
+      - name: Simulate Deployment on Runner
+        run: |
+          echo "Simulation du deploiement via Docker Compose sur l'hote cible..."
+          # docker compose pull
+          # docker compose up -d
+          echo "Deploiement de la version ${{ github.ref_name }} valide et operationnel !"

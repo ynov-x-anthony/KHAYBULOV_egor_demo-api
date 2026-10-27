@@ -11,6 +11,7 @@
  */
 
 const express = require('express');
+const http = require('http'); // Requis pour l'appel au notifier
 const db = require('./db');
 
 const PORT = Number(process.env.PORT || 3000);
@@ -63,7 +64,39 @@ app.post('/products', async (req, res) => {
     return res.status(400).json({ error: 'name (string) et price_cents (entier >= 0) requis' });
   }
   try {
-    res.status(201).json(await db.addProduct(name, priceCents));
+    const product = await db.addProduct(name, priceCents);
+
+    // --- APPEL BEST-EFFORT VERS LE SERVICE NOTIFIER ---
+    const payload = JSON.stringify({ event: 'product_created', product: product });
+
+    const reqNotify = http.request({
+      hostname: 'notifier', // Résolution DNS Docker grâce au nom du service dans le compose
+      port: 3001,
+      path: '/notify',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload)
+      }
+    }, (notifyRes) => {
+      // Consomme la réponse pour libérer les sockets réseau
+      notifyRes.on('data', () => {});
+    });
+
+    // Gestion de l'erreur réseau (Best-effort) : évite le crash si le notifier est KO
+    reqNotify.on('error', (err) => {
+      console.log(JSON.stringify({
+        level: 'warn',
+        msg: 'Notifier service call failed but product was successfully saved',
+        error: err.message
+      }));
+    });
+
+    reqNotify.write(payload);
+    reqNotify.end();
+    // --------------------------------------------------
+
+    res.status(201).json(product);
   } catch (err) {
     res.status(503).json({ error: 'db_unavailable', detail: err.message });
   }
